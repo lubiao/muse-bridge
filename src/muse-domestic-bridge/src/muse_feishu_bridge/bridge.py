@@ -92,11 +92,11 @@ class Bridge:
             return
         with self.health_lock:
             self.health["last_incoming_at"] = time.time()
-        # Acknowledge before any slow work: media downloads and a full Muse turn
-        # can take a while, and an unanswered message looks lost in the meantime.
+        # Acknowledge every accepted message before any slow work. Media
+        # downloads and a full Muse turn can take a while, and without a receipt
+        # an unanswered message is indistinguishable from a lost one.
         # Fire-and-forget on a thread so the SDK event loop is never blocked.
-        if is_file or text.strip().startswith('/read'):
-            self._acknowledge_async(message_id)
+        self._acknowledge_async(message_id)
         if is_file:
             payload = message.get('file')
             if isinstance(payload, dict) and (isinstance(payload.get('file_key'), str) or payload.get('media_kind') == 'image'):
