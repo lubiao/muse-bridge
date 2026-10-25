@@ -1,0 +1,57 @@
+name: muse-bridge
+
+services:
+  bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: muse-bridge:0.1.0b1
+    container_name: muse-bridge
+    restart: unless-stopped
+
+    # 纯出站：不映射任何端口。
+    # 桥只主动连飞书长连接 + Muse 网关，不需要 inbound。
+
+    volumes:
+      - ./config:/config
+      - ./state:/state
+
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      MUSEBRIDGE_LOG_LEVEL: ${MUSEBRIDGE_LOG_LEVEL:-INFO}
+      # hatch.metaaivm.com 的 DNS 在国内被污染（解析到 2001::1 这类假地址），
+      # 容器内通常需要经代理出网才能真正连上 Muse 网关。
+      # 不需要代理时，把 .env 里这几项留空即可。
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      # 飞书域名走直连：国内访问本来就快，绕代理反而慢。
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,open.feishu.cn,.feishu.cn,.feishu.net,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,::1,open.feishu.cn,.feishu.cn,.feishu.net,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12}
+
+    # 与上游 systemd unit 同级别的加固
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 2g
+    mem_reservation: 512m
+    pids_limit: 64
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      # 不联网探活，只看配置可读与状态文件是否正常推进
+      test: ["CMD", "muse-bridge", "status", "feishu", "--config", "/config/config.json"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s

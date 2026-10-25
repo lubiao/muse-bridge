@@ -1,0 +1,47 @@
+[Unit]
+Description=Personal Muse bridge (@@CHANNEL@@)
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/muse-domestic-bridge/config.json
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=muse-bridge
+Group=muse-bridge
+@@MEDIA_GROUP@@
+WorkingDirectory=/var/lib/muse-domestic-bridge
+ExecStart=/opt/muse-domestic-bridge/venv/bin/muse-bridge run @@CHANNEL@@ --config /etc/muse-domestic-bridge/config.json
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+Restart=on-failure
+RestartSec=15
+KillSignal=SIGTERM
+TimeoutStopSec=30
+MemoryHigh=1500M
+MemoryMax=2G
+TasksMax=64
+StateDirectory=muse-domestic-bridge
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/muse-domestic-bridge @@MEDIA_PATH@@
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

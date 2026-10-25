@@ -1,0 +1,17 @@
+Muse Domestic Bridge
+Copyright 2026 Muse Domestic Bridge contributors.
+
+Includes authentication/Gateway adaptations of muse-cli:
+Copyright (c) 2026 Nik Ships, MIT License.
+See licenses/muse-cli-MIT.txt.
+
+Includes a modified protocol adaptation referencing Muse Gadget SDK framing:
+Copyright (c) Meta Platforms, Inc. and affiliates, Apache License 2.0.
+See licenses/muse-gadget-sdk-Apache-2.0.txt.
+
+Includes Python adaptations of Tencent openclaw-weixin protocol/media behavior:
+Copyright (C) 2026 Tencent, MIT License.
+See licenses/openclaw-weixin-MIT.txt.
+
+These notices do not imply endorsement by the upstream authors or service providers.
+NapCat/QQ code, executables and account data are not included in this distribution.

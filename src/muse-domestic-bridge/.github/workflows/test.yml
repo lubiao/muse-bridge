@@ -1,0 +1,31 @@
+name: Offline tests
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  selected-channel:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [weixin, feishu, qq]
+        python: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install selected channel only
+        run: python -m pip install ".[${{ matrix.channel }},test]"
+      - name: Dependency and import smoke checks
+        run: |
+          python -m pip check
+          muse-bridge --version
+      - name: Offline regressions
+        run: python -m pytest tests/${{ matrix.channel }} tests/public -q
+      - name: Publication check
+        run: python scripts/check_public_tree.py
+      - name: Installer syntax
+        run: bash -n deploy/install.sh

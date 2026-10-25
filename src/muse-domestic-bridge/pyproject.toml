@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "muse-domestic-bridge"
+version = "0.1.0b1"
+description = "Single-owner Feishu, Weixin and QQ bridges to an existing Meta Muse main chat"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "licenses/*.txt"]
+authors = [{name = "Muse Domestic Bridge contributors"}]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Communications :: Chat",
+]
+dependencies = [
+  "muse-cli==0.3.2",
+  "requests>=2.32,<3",
+  "Pillow==13.0.0",
+]
+
+[project.optional-dependencies]
+feishu = ["lark-oapi==1.7.5", "requests-toolbelt>=1,<2", "av>=14,<19"]
+weixin = ["cryptography>=44", "qrcode>=8,<9"]
+qq = ["websockets>=15,<16"]
+all = ["lark-oapi==1.7.5", "requests-toolbelt>=1,<2", "av>=14,<19", "cryptography>=44", "qrcode>=8,<9", "websockets>=15,<16"]
+test = ["pytest>=8,<10"]
+dev = ["pytest>=8,<10", "build>=1.2,<2"]
+
+[project.scripts]
+muse-bridge = "muse_bridge.cli:main"
+muse-feishu = "muse_feishu_bridge.cli:main"
+
+[project.urls]
+Repository = "https://github.com/norlingdumar-arch/muse-domestic-bridge"
+Issues = "https://github.com/norlingdumar-arch/muse-domestic-bridge/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/muse_bridge", "src/muse_feishu_bridge", "src/muse_weixin_bridge", "src/muse_qq_bridge"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/examples", "/deploy", "/docs", "/scripts", "/licenses", "/.github", "/.gitignore", "/.gitattributes", "/*.md", "/LICENSE", "/NOTICE", "/pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"

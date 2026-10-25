@@ -1,0 +1,12 @@
+{
+  "channel": "qq",
+  "app_id": "",
+  "secrets_file": "secrets.json",
+  "data_dir": "/var/lib/muse-domestic-bridge",
+  "history_limit": 500,
+  "max_message_chars": 20000,
+  "outbound_chunk_chars": 2000,
+  "qq_credentials_file": "/etc/muse-domestic-bridge/qq.json",
+  "shared_dir": "/var/lib/muse-domestic-bridge-media",
+  "download_roots": []
+}
