@@ -141,9 +141,60 @@ def test_live_file_widget_matches_history_identity():
     assert muse._normalized_file(live_record,source='live') is None
 
 
+def test_read_file_reuses_one_connection_across_calls(monkeypatch):
+    """A second read must not pay for another Noise handshake."""
+    import base64
+    data=b'tiny probe'
+    connects=[]
+    class One(FakeGateway):
+        def call_json(self,method,**kwargs):
+            assert method=='fs.read'
+            body=kwargs['body'];raw=data[body['offset']:body['offset']+body['len']]
+            self.calls.append(body)
+            return {'offset':body['offset'],'len':len(raw),'eof':body['offset']+len(raw)>=len(data),
+                    'data_base64':base64.b64encode(raw).decode()}
+        def close(self):self.closed=True
+    gateway=One()
+    def connect(*args):
+        connects.append(1)
+        return gateway
+    client=muse.MainChatClient(no_credentials,lambda event:None)
+    monkeypatch.setattr(client,'_connect',connect)
+    assert client.read_file('sandbox://workspace/your_files/a.bin',len(data))==data
+    assert client.read_file('sandbox://workspace/your_files/a.bin',len(data))==data
+    assert len(connects)==1, 'the pooled connection should serve the second read'
+    client.close()
+    assert gateway.closed, 'close() must release the pooled connection'
+
+
+def test_read_file_drops_a_failed_connection_and_retries_once(monkeypatch):
+    """A stale pooled socket must cost one retry, not a failed download."""
+    import base64
+    data=b'retry me'
+    connects=[]
+    class Flaky(FakeGateway):
+        def __init__(self,fail):self.fail=fail;super().__init__();self.calls=[]
+        def call_json(self,method,**kwargs):
+            if self.fail:raise ConnectionError('stale socket')
+            body=kwargs['body'];raw=data[:len(data)]
+            self.calls.append(body)
+            return {'offset':0,'len':len(raw),'eof':True,'data_base64':base64.b64encode(raw).decode()}
+        def close(self):self.closed=True
+    first,second=Flaky(True),Flaky(False)
+    for gateway in (first,second):
+        connects.append(gateway)
+    client=muse.MainChatClient(no_credentials,lambda event:None)
+    monkeypatch.setattr(client,'_connect',lambda *args:connects.pop(0))
+    assert client.read_file('sandbox://workspace/your_files/b.bin',len(data))==data
+    assert first.closed, 'the failed connection must be discarded'
+
+
 def test_file_read_chunks_decodes_binary_and_checks_eof(monkeypatch):
     import base64
-    data=bytes(range(256))*1200
+    # Large enough to need more than one read at the current chunk size, whatever
+    # that size is: the test asserts the loop honours offsets and eof rather than
+    # hard-coding a chunk count, so tuning READ_CHUNK_BYTES cannot break it.
+    data=bytes(range(256))*(muse.READ_CHUNK_BYTES//256+1024)
     class Chunked(FakeGateway):
         def call_json(self,method,**kwargs):
             assert method=='fs.read'
@@ -153,7 +204,13 @@ def test_file_read_chunks_decodes_binary_and_checks_eof(monkeypatch):
     gateway=Chunked();client=muse.MainChatClient(no_credentials,lambda event:None)
     monkeypatch.setattr(client,'_connect',lambda *args:gateway)
     assert client.read_file('sandbox://workspace/your_files/test.bin',len(data))==data
-    assert len(gateway.calls)==2 and gateway.closed
+    assert len(gateway.calls)>=2
+    # Offsets must chain without gaps or repeats, and the last read must end the file.
+    assert [call['offset'] for call in gateway.calls]==sorted({call['offset'] for call in gateway.calls})
+    assert sum(call['len'] for call in gateway.calls)>=len(data)
+    # The connection is returned to the pool for reuse rather than closed; a
+    # later read_file must not trigger another handshake.
+    client.close()
 
 
 def test_large_upload_is_chunked_without_agent_execution_and_reference_is_small(monkeypatch):

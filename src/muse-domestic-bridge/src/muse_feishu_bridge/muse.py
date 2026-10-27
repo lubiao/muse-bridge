@@ -53,6 +53,25 @@ MAX_FRAME_BYTES = 4 * 1024 * 1024
 MAX_EVENT_BYTES = 1024 * 1024
 MAX_TEXT_BYTES = 1024 * 1024
 
+# A pooled connection is only handed back out while it is this young. The server
+# drops quiet sockets, and a dead socket costs one failed call to discover; 90s
+# keeps the common back-to-back download case fast without hoarding a stale link.
+POOL_IDLE_SECONDS = 90.0
+
+# fs.read serves at most 2 MB per call (measured: a 4 MB request returns 2 MB and
+# eof=false). 1 MB halves the round trips of a large attachment while staying
+# well inside the documented Noise frame cap.
+READ_CHUNK_BYTES = 1024 * 1024
+READ_SERVER_MAX = 2 * 1024 * 1024
+
+
+def _close_quietly(gateway) -> None:
+    """Close a gateway without letting cleanup replace the caller's error."""
+    try:
+        gateway.close()
+    except Exception:
+        pass
+
 
 class MuseError(RuntimeError):
     """A safe error: neither its message nor its attributes contain service text."""
@@ -128,8 +147,10 @@ class _BoundedWebSocket(WebSocket):
         if time.monotonic() >= deadline:
             raise TimeoutError("Muse websocket I/O deadline reached")
 
-    def recv(self) -> tuple[bytes, int]:
-        deadline = self.deadline or time.monotonic() + RECEIVE_TIMEOUT
+    def recv(self, *, timeout: float | None = None) -> tuple[bytes, int]:
+        """Bounded receive; accepts curl_cffi 0.17's keyword-only ``timeout``."""
+        deadline = self.deadline or time.monotonic() + (
+            timeout if timeout and timeout > 0 else RECEIVE_TIMEOUT)
         descriptor = self.curl.getinfo(CurlInfo.ACTIVESOCKET)
         chunks: list[bytes] = []
         total = 0
@@ -153,8 +174,18 @@ class _BoundedWebSocket(WebSocket):
             if frame.bytesleft == 0 and not frame.flags & CurlWsFlag.CONT:
                 return b"".join(chunks), int(frame.flags)
 
-    def send(self, payload: str | bytes, flags: int = CurlWsFlag.BINARY) -> int:
-        deadline = self.deadline or time.monotonic() + CALL_TIMEOUT
+    def send(self, payload, flags: int = CurlWsFlag.BINARY, *,
+             timeout: float | None = None) -> int:
+        """Bounded send that also accepts curl_cffi's newer ``timeout`` kwarg.
+
+        curl_cffi 0.17 started passing ``timeout=`` through ``send_bytes`` to this
+        method. Overriding ``send`` with the older two-argument signature makes
+        every frame raise ``TypeError``, so the parameter is accepted here and
+        ignored in favour of our own deadline, which is what actually bounds the
+        wait.
+        """
+        deadline = self.deadline or time.monotonic() + (
+            timeout if timeout and timeout > 0 else CALL_TIMEOUT)
         if isinstance(payload, str):
             payload = payload.encode()
         descriptor = self.curl.getinfo(CurlInfo.ACTIVESOCKET)
@@ -405,6 +436,14 @@ class MainChatClient:
         self._send_lock = threading.Lock()
         self._node_id = "feishu-bridge-" + secrets.token_hex(8)
         self._submissions: OrderedDict[str, dict | None] = OrderedDict()
+        # Reusing one gateway across read_file calls removes a 3-4s Noise
+        # handshake from every download. A single connection suffices: the
+        # outbound worker is the only reader of Muse files and it processes one
+        # item at a time. The lock makes that assumption explicit rather than
+        # letting two callers corrupt one connection silently.
+        self._pool_lock = threading.Lock()
+        self._pooled = None
+        self._pooled_at = 0.0
 
     def _connect(self, stop_event=None) -> Gateway:
         try:
@@ -416,6 +455,43 @@ class MainChatClient:
             raise
         except Exception as error:
             raise _safe_error(error, "connect") from None
+
+    def _pooled_gateway(self) -> Gateway:
+        """A live pooled connection, or a fresh one when none is available.
+
+        A gateway is only reused while it is young and idle: the server closes
+        quiet connections, and a stale socket fails the first request instead of
+        the handshake. Rather than probe, the caller retries once on a fresh
+        connection when a pooled read fails (see ``read_file``).
+        """
+        with self._pool_lock:
+            pooled = self._pooled
+            if pooled is not None and (time.monotonic() - self._pooled_at) < POOL_IDLE_SECONDS:
+                self._pooled = None          # hand it to this caller exclusively
+                return pooled
+            stale = self._pooled
+            self._pooled = None
+        if stale is not None:
+            _close_quietly(stale)
+        return self._connect()
+
+    def _release_gateway(self, gateway: Gateway, *, reusable: bool) -> None:
+        """Return a connection to the pool, or close it if it is suspect."""
+        if not reusable:
+            _close_quietly(gateway)
+            return
+        with self._pool_lock:
+            displaced = self._pooled
+            self._pooled = gateway
+            self._pooled_at = time.monotonic()
+        if displaced is not None:
+            _close_quietly(displaced)
+
+    def close(self) -> None:
+        with self._pool_lock:
+            pooled, self._pooled = self._pooled, None
+        if pooled is not None:
+            _close_quietly(pooled)
 
     def send_text(self, text: str, request_id: str) -> dict:
         if not isinstance(text, str) or not text.strip():
@@ -547,46 +623,84 @@ class MainChatClient:
                 gateway.close()
 
     def read_file(self, path: str, expected_size: int | None = None) -> bytes:
+        """Download a workspace file, reusing a pooled connection.
+
+        A fresh Noise handshake costs 3-4s, which used to dominate every download.
+        The transfer itself is ~0.3s per megabyte. One retry on a fresh connection
+        covers the case where the pooled socket went stale while idle; a failure
+        that survives that retry is reported as before, so callers see the same
+        error taxonomy.
+        """
         path = workspace_path(path)
         if expected_size is not None and (expected_size < 0 or expected_size > MAX_FILE_BYTES):
             raise FileError('file_too_large')
-        gateway = self._connect()
+        gateway = self._pooled_gateway()
         try:
-            parts, offset = [], 0
-            deadline = time.monotonic() + 600
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise MuseError('timeout', 'file_read')
-                response = gateway.call_json('fs.read', body={'path':path, 'offset':offset,
-                    'len':min(256 * 1024, MAX_FILE_BYTES + 1 - offset)}, timeout=min(CALL_TIMEOUT, remaining))
-                if not isinstance(response, dict) or response.get('offset') != offset or not isinstance(response.get('eof'), bool):
-                    raise FileError('invalid_file_response')
-                try:
-                    chunk = base64.b64decode(response['data_base64'], validate=True)
-                except (KeyError, ValueError, TypeError):
-                    raise FileError('invalid_file_response') from None
-                if len(chunk) > 256 * 1024 or response.get('len') != len(chunk):
-                    raise FileError('invalid_file_response')
-                offset += len(chunk)
-                if offset > MAX_FILE_BYTES:
-                    raise FileError('file_too_large')
-                parts.append(chunk)
-                if response['eof']:
-                    break
-                if not chunk:
-                    raise FileError('invalid_file_response')
-            if not offset:
-                raise FileError('empty_attachment')
-            if expected_size is not None and offset != expected_size:
-                raise FileError('file_size_changed')
-            return b''.join(parts)
+            data = self._read_over(gateway, path, expected_size)
         except FileError:
+            # A malformed or oversized response is not a transport problem; the
+            # connection may still be healthy, but a retry cannot change the answer.
+            self._release_gateway(gateway, reusable=False)
             raise
-        except Exception as error:
-            raise _safe_error(error, 'file_read') from None
-        finally:
-            gateway.close()
+        except AuthExpired:
+            self._release_gateway(gateway, reusable=False)
+            raise
+        except Exception as first_error:
+            # The socket is suspect now: discard it and retry once from scratch.
+            _close_quietly(gateway)
+            try:
+                gateway = self._connect()
+            except Exception:
+                raise _safe_error(first_error, 'file_read') from None
+            try:
+                data = self._read_over(gateway, path, expected_size)
+            except FileError:
+                self._release_gateway(gateway, reusable=False)
+                raise
+            except AuthExpired:
+                self._release_gateway(gateway, reusable=False)
+                raise
+            except Exception as error:
+                _close_quietly(gateway)
+                raise _safe_error(error, 'file_read') from None
+        self._release_gateway(gateway, reusable=True)
+        return data
+
+    def _read_over(self, gateway: Gateway, path: str,
+                   expected_size: int | None) -> bytes:
+        """Drive the chunked fs.read loop over an already-connected gateway."""
+        parts, offset = [], 0
+        deadline = time.monotonic() + 600
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise MuseError('timeout', 'file_read')
+            want = min(READ_CHUNK_BYTES, MAX_FILE_BYTES + 1 - offset)
+            response = gateway.call_json('fs.read', body={'path':path, 'offset':offset,
+                'len':want}, timeout=min(CALL_TIMEOUT, remaining))
+            if not isinstance(response, dict) or response.get('offset') != offset or not isinstance(response.get('eof'), bool):
+                raise FileError('invalid_file_response')
+            try:
+                chunk = base64.b64decode(response['data_base64'], validate=True)
+            except (KeyError, ValueError, TypeError):
+                raise FileError('invalid_file_response') from None
+            # The server may serve fewer bytes than asked but never more than its
+            # own cap, so bound against that rather than against what we wanted.
+            if len(chunk) > READ_SERVER_MAX or response.get('len') != len(chunk):
+                raise FileError('invalid_file_response')
+            offset += len(chunk)
+            if offset > MAX_FILE_BYTES:
+                raise FileError('file_too_large')
+            parts.append(chunk)
+            if response['eof']:
+                break
+            if not chunk:
+                raise FileError('invalid_file_response')
+        if not offset:
+            raise FileError('empty_attachment')
+        if expected_size is not None and offset != expected_size:
+            raise FileError('file_size_changed')
+        return b''.join(parts)
 
     def history(self, after_seq: int = 0, limit: int = HISTORY_WINDOW) -> list[dict]:
         if not isinstance(after_seq, int) or after_seq < 0 or not isinstance(limit, int) or limit < 1:

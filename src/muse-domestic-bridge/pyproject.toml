@@ -21,6 +21,12 @@ dependencies = [
   "muse-cli==0.3.2",
   "requests>=2.32,<3",
   "Pillow==13.0.0",
+  # muse-cli declares curl-cffi with no upper bound. 0.17 changed the signature of
+  # WebSocket.send to add a keyword-only ``timeout`` and now passes it through
+  # send_bytes; the bounded transport override in muse.py accepts it, but the pin
+  # keeps a further signature change from turning every frame into a TypeError at
+  # runtime, which is invisible until the bridge is rebuilt.
+  "curl-cffi>=0.13,<0.18",
 ]
 
 [project.optional-dependencies]
